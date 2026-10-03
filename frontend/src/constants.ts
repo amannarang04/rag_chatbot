@@ -1,0 +1,3 @@
+export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
+export const MAX_UPLOAD_SIZE_LABEL = `${MAX_UPLOAD_BYTES / (1024 * 1024)} MB`
