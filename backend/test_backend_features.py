@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 from unittest.mock import patch
 
@@ -129,6 +130,34 @@ class BackendFeatureTests(unittest.TestCase):
         self.assertEqual(store._index.ntotal, 1)
         self.assertEqual(len(store.list_documents()), 1)
 
+    def test_concurrent_identical_uploads_add_one_document_and_one_chunk(self) -> None:
+        from app.routes import documents as document_routes
+        from unittest.mock import AsyncMock
+        store = VectorStore()
+        chunks = [{"text": "same source", "chunk_index": 0, "source_filename": "paper.pdf"}]
+        with (
+            patch.object(main, "load_embedding_model"),
+            patch.object(document_routes, "vector_store", store),
+            patch.object(document_routes, "extract_pdf_chunks", new=AsyncMock(return_value=chunks)),
+            patch.object(document_routes, "embed_texts", return_value=np.array([[1.0, 0.0]], dtype=np.float32)),
+            TestClient(app) as client,
+            ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            def upload() -> dict[str, object]:
+                response = client.post(
+                    "/documents/upload",
+                    files={"file": ("paper.pdf", b"same concurrent bytes", "application/pdf")},
+                )
+                self.assertEqual(response.status_code, 200)
+                return response.json()
+
+            responses = list(pool.map(lambda _index: upload(), range(2)))
+        self.assertEqual(responses[0]["document_id"], responses[1]["document_id"])
+        self.assertEqual(sum(bool(response["duplicate"]) for response in responses), 1)
+        self.assertEqual(len(store.list_documents()), 1)
+        self.assertEqual(store._index.ntotal, 1)
+        self.assertEqual(len(store._metadata), 1)
+
     def test_get_documents_returns_registry(self) -> None:
         with patch.object(main, "load_embedding_model"), TestClient(app) as client:
             response = client.get("/documents")
@@ -155,17 +184,32 @@ class BackendFeatureTests(unittest.TestCase):
         self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:5173")
 
     def test_research_response_includes_claims_checked(self) -> None:
-        from app.routes import research as research_routes
-        state = {
-            "report": "result", "evaluation": {"faithfulness_score": 1.0, "flagged_claims": [], "total_claims_checked": 0},
-            "agent_trace": [], "retry_count": 0,
-        }
-        with patch.object(main, "load_embedding_model"), patch.object(
-            research_routes.get_research_graph(), "invoke", return_value=state
-        ) as invoke, TestClient(app) as client:
-            response = client.post("/research/query", json={"question": "question"})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["claims_checked"], 0)
+        from app.agents import orchestrator
+        from app.routes.research import ResearchQuery, research_query
+
+        orchestrator.get_research_graph.cache_clear()
+        try:
+            with (
+                patch.object(orchestrator, "retrieve_chunks", return_value=[{"text": "source"}]),
+                patch.object(orchestrator, "analyze_chunks", return_value={}),
+                patch.object(orchestrator, "write_report", side_effect=["draft", "final report"]),
+                patch.object(
+                    orchestrator,
+                    "evaluate_report",
+                    side_effect=[
+                        {"faithfulness_score": 0.4, "flagged_claims": ["draft claim"], "total_claims_checked": 2},
+                        {"faithfulness_score": 0.95, "flagged_claims": [], "total_claims_checked": 4},
+                    ],
+                ),
+            ):
+                response = research_query(ResearchQuery(question="question"))
+        finally:
+            orchestrator.get_research_graph.cache_clear()
+        self.assertEqual(response["report"], "final report")
+        self.assertEqual(response["faithfulness_score"], 0.95)
+        self.assertEqual(response["flagged_claims"], [])
+        self.assertEqual(response["claims_checked"], 4)
+        self.assertEqual(response["retries"], 1)
 
 
 if __name__ == "__main__":

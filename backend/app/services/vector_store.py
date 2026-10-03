@@ -2,8 +2,6 @@ from threading import RLock
 from typing import Any
 from datetime import datetime, timezone
 import faiss
-
-import faiss
 import numpy as np
 
 
