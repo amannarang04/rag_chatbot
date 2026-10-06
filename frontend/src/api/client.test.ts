@@ -17,12 +17,16 @@ describe('API error parsing', () => {
     expect(error.status).toBe(422)
   })
 
-  it.each([
-    [413, 'Payload Too Large'],
-    [500, 'Internal Server Error'],
-  ])('keeps non-JSON %i response bodies readable', (status, body) => {
-    const error = parseApiError(status, body)
-    expect(error.message).toBe(body)
-    expect(error.status).toBe(status)
+  it('keeps 5xx technical details separate from the generic user message', () => {
+    const error = parseApiError(500, 'Internal Server Error')
+    expect(error.message).toBe('The server ran into an error. Please try again.')
+    expect(error.technicalDetail).toBe('Internal Server Error')
+    expect(error.status).toBe(500)
+  })
+
+  it('keeps non-5xx API details readable', () => {
+    const error = parseApiError(413, 'Payload Too Large')
+    expect(error.message).toBe('Payload Too Large')
+    expect(error.status).toBe(413)
   })
 })

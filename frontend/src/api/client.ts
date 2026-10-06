@@ -46,12 +46,16 @@ export function formatApiErrorDetail(detail: unknown): string {
 export class ApiError extends Error {
   readonly status: number
   readonly detail: unknown
+  readonly technicalDetail: string
 
   constructor(status: number, detail: unknown) {
-    super(formatApiErrorDetail(detail) || `Request failed with status ${status}`)
+    super(status >= 500
+      ? 'The server ran into an error. Please try again.'
+      : formatApiErrorDetail(detail) || `Request failed with status ${status}`)
     this.name = 'ApiError'
     this.status = status
     this.detail = detail
+    this.technicalDetail = formatApiErrorDetail(detail)
   }
 }
 
@@ -75,6 +79,20 @@ export class NetworkError extends Error {
   }
 }
 
+export class ConfigError extends Error {
+  constructor() {
+    super('App is not configured (VITE_API_BASE_URL missing).')
+    this.name = 'ConfigError'
+  }
+}
+
+export class InvalidResponseError extends Error {
+  constructor() {
+    super('The server sent an unexpected response.')
+    this.name = 'InvalidResponseError'
+  }
+}
+
 export class RequestTimeoutError extends Error {
   constructor() {
     super('The request timed out.')
@@ -91,12 +109,45 @@ export class RequestAbortedError extends Error {
 
 function endpoint(path: string): string {
   if (!baseUrl) {
-    throw new Error('Set VITE_API_BASE_URL in frontend/.env before making API requests.')
+    throw new ConfigError()
   }
   return `${baseUrl}${path}`
 }
 
-async function readFetchResponse<T>(response: Response): Promise<T> {
+function isUploadResponse(value: unknown): value is UploadResponse {
+  return isRecord(value) && typeof value.filename === 'string' &&
+    typeof value.chunks_added === 'number' && Number.isInteger(value.chunks_added) && value.chunks_added >= 0 &&
+    typeof value.document_id === 'string' && typeof value.duplicate === 'boolean'
+}
+
+function isDocumentRecord(value: unknown): value is DocumentRecord {
+  return isRecord(value) && typeof value.document_id === 'string' && typeof value.filename === 'string' &&
+    typeof value.chunks === 'number' && Number.isInteger(value.chunks) && value.chunks >= 0 &&
+    typeof value.uploaded_at === 'string'
+}
+
+function isDocumentRecordArray(value: unknown): value is DocumentRecord[] {
+  return Array.isArray(value) && value.every(isDocumentRecord)
+}
+
+function isSearchResponse(value: unknown): value is SearchResponse {
+  return isRecord(value) && Array.isArray(value.results) && value.results.every((item) =>
+    isRecord(item) && typeof item.text === 'string' && typeof item.source_filename === 'string' &&
+    typeof item.chunk_index === 'number' && Number.isInteger(item.chunk_index) &&
+    typeof item.document_id === 'string' && typeof item.distance === 'number',
+  )
+}
+
+function isResearchResponse(value: unknown): value is ResearchResponse {
+  return isRecord(value) && typeof value.report === 'string' &&
+    typeof value.faithfulness_score === 'number' && value.faithfulness_score >= 0 && value.faithfulness_score <= 1 &&
+    Array.isArray(value.flagged_claims) && value.flagged_claims.every((item) => typeof item === 'string') &&
+    Array.isArray(value.agent_trace) && value.agent_trace.every((item) => typeof item === 'string') &&
+    typeof value.retries === 'number' && Number.isInteger(value.retries) && value.retries >= 0 &&
+    typeof value.claims_checked === 'number' && Number.isInteger(value.claims_checked) && value.claims_checked >= 0
+}
+
+async function readFetchResponse<T>(response: Response, guard: (value: unknown) => value is T): Promise<T> {
   const rawBody = await response.text()
   let payload: unknown = rawBody
   if (rawBody) {
@@ -111,10 +162,11 @@ async function readFetchResponse<T>(response: Response): Promise<T> {
     throw parseApiError(response.status, rawBody)
   }
 
-  return payload as T
+  if (typeof payload === 'string' || !guard(payload)) throw new InvalidResponseError()
+  return payload
 }
 
-async function request<T>(path: string, init: RequestInit = {}, signal?: AbortSignal): Promise<T> {
+async function request<T>(path: string, guard: (value: unknown) => value is T, init: RequestInit = {}, signal?: AbortSignal): Promise<T> {
   const controller = new AbortController()
   let timedOut = false
   const timeout = globalThis.setTimeout(() => {
@@ -127,9 +179,9 @@ async function request<T>(path: string, init: RequestInit = {}, signal?: AbortSi
 
   try {
     const response = await fetch(endpoint(path), { ...init, signal: controller.signal })
-    return await readFetchResponse<T>(response)
+    return await readFetchResponse(response, guard)
   } catch (error) {
-    if (error instanceof ApiError) throw error
+    if (error instanceof ApiError || error instanceof ConfigError || error instanceof InvalidResponseError) throw error
     if (timedOut) throw new RequestTimeoutError()
     if (signal?.aborted) throw new RequestAbortedError()
     throw new NetworkError(error instanceof Error ? error.message : undefined)
@@ -171,7 +223,11 @@ function uploadWithProgress(
         reject(parseApiError(xhr.status, xhr.responseText))
         return
       }
-      resolve(payload as UploadResponse)
+      if (typeof payload === 'string' || !isUploadResponse(payload)) {
+        reject(new InvalidResponseError())
+        return
+      }
+      resolve(payload)
     }
     xhr.onerror = () => reject(new NetworkError())
     xhr.ontimeout = () => {
@@ -199,12 +255,13 @@ export const api = {
   },
 
   listDocuments(signal?: AbortSignal): Promise<DocumentRecord[]> {
-    return request<DocumentRecord[]>('/documents', {}, signal)
+    return request('/documents', isDocumentRecordArray, {}, signal)
   },
 
   searchDocuments(input: SearchRequest, signal?: AbortSignal): Promise<SearchResponse> {
     return request(
       '/documents/search',
+      isSearchResponse,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -217,6 +274,7 @@ export const api = {
   research(input: ResearchRequest, signal?: AbortSignal): Promise<ResearchResponse> {
     return request(
       '/research/query',
+      isResearchResponse,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
