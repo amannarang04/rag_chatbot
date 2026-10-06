@@ -2,12 +2,12 @@
 
 ## Checklist
 
-- [x] Client response validation and typed errors (implementation ready for commit 1)
-- [ ] Separate upload timeout and remove dead abort branch
+- [x] Client response validation and typed errors (commit `635d659`)
+- [x] Separate upload timeout and remove dead abort branch (implementation ready for commit 2)
 - [ ] Stubbed-fetch timeout, abort, network, and invalid-response tests
 - [ ] UploadPanel cancellation, drag/drop handling, and PDF validation
 - [x] Backend contract checked: `GET /documents` is a bare array; search result includes `document_id`
 
 ## Last commit hash
 
-`887fec5` (base before hardening commits)
+`635d659` (client validation and typed errors)

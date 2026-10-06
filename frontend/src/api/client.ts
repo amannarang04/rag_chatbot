@@ -10,6 +10,7 @@ import type {
 const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim()
 const baseUrl = configuredBaseUrl?.replace(/\/+$/, '')
 const REQUEST_TIMEOUT_MS = 180_000
+const UPLOAD_TIMEOUT_MS = 600_000
 
 type ValidationIssue = {
   loc?: unknown
@@ -203,10 +204,9 @@ function uploadWithProgress(
     }
 
     const xhr = new XMLHttpRequest()
-    let timedOut = false
     const abortUpload = () => xhr.abort()
     xhr.open('POST', endpoint('/documents/upload'))
-    xhr.timeout = REQUEST_TIMEOUT_MS
+    xhr.timeout = UPLOAD_TIMEOUT_MS
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) onProgress?.(Math.round((event.loaded / event.total) * 100))
     }
@@ -230,11 +230,8 @@ function uploadWithProgress(
       resolve(payload)
     }
     xhr.onerror = () => reject(new NetworkError())
-    xhr.ontimeout = () => {
-      timedOut = true
-      reject(new RequestTimeoutError())
-    }
-    xhr.onabort = () => reject(timedOut ? new RequestTimeoutError() : new RequestAbortedError())
+    xhr.ontimeout = () => reject(new RequestTimeoutError())
+    xhr.onabort = () => reject(new RequestAbortedError())
     signal?.addEventListener('abort', abortUpload, { once: true })
     xhr.onloadend = () => signal?.removeEventListener('abort', abortUpload)
 
